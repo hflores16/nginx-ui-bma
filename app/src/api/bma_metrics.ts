@@ -4,6 +4,7 @@ export type MetricsPeriod = '1m' | '5m' | '15m' | '1h' | '6h' | '24h'
 
 export interface MetricsSummary {
   active_clients: number
+  active_sessions: number
   requests: number
   requests_per_second: number
   avg_response_ms: number
@@ -25,7 +26,9 @@ export interface BackendSummary {
   port: string
   upstreams?: string[]
   active_clients: number
+  active_sessions: number
   client_percent: number
+  request_percent: number
   requests: number
   requests_per_second: number
   avg_response_ms: number
@@ -33,6 +36,8 @@ export interface BackendSummary {
   status_4xx: number
   status_5xx: number
   bytes: number
+  configured: boolean
+  has_traffic: boolean
   online?: boolean
   health_latency_ms?: number
 }
