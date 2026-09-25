@@ -21,15 +21,15 @@ const serviceFilter = ref('')
 const portFilter = ref('')
 let refreshTimer: ReturnType<typeof setInterval> | undefined
 
-type HistoryMetric =
-  | 'requests_per_second'
-  | 'requests'
-  | 'active_clients'
-  | 'avg_response_ms'
-  | 'avg_connect_ms'
-  | 'status_4xx'
-  | 'status_5xx'
-  | 'bytes_mb'
+type HistoryMetric
+  = | 'requests_per_second'
+    | 'requests'
+    | 'active_clients'
+    | 'avg_response_ms'
+    | 'avg_connect_ms'
+    | 'status_4xx'
+    | 'status_5xx'
+    | 'bytes_mb'
 
 const historyMetric = ref<HistoryMetric>('requests_per_second')
 
@@ -269,6 +269,8 @@ function historyMetricValue(point: MetricsResponse['history'][number], metric: H
       return point.status_5xx
     case 'bytes_mb':
       return point.bytes / 1024 / 1024
+    default:
+      return 0
   }
 }
 
@@ -290,6 +292,8 @@ const historyMetricMeta = computed(() => {
       return { label: $gettext('Errores 5XX'), suffix: '', digits: 0, integer: true, gapsAsZero: true }
     case 'bytes_mb':
       return { label: $gettext('Transferido'), suffix: ' MB', digits: 2, integer: false, gapsAsZero: true }
+    default:
+      return { label: $gettext('Requests por segundo'), suffix: ' req/s', digits: 2, integer: false, gapsAsZero: true }
   }
 })
 
@@ -358,7 +362,6 @@ const historyOption = computed<EChartsOption>(() => {
     series,
   }
 })
-
 </script>
 
 <template>
