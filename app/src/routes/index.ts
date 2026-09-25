@@ -5,6 +5,7 @@ import { useUserStore } from '@/pinia'
 import { authRoutes } from './modules/auth'
 
 import { backupRoutes } from './modules/backup'
+import { bmaMetricsRoutes } from './modules/bma_metrics'
 import { certificatesRoutes } from './modules/certificates'
 import { configRoutes } from './modules/config'
 import { dashboardRoutes } from './modules/dashboard'
@@ -29,6 +30,7 @@ const mainLayoutChildren: RouteRecordRaw[] = [
   ...sitesRoutes,
   ...streamsRoutes,
   ...upstreamRoutes,
+  ...bmaMetricsRoutes,
   ...configRoutes,
   ...certificatesRoutes,
   ...dnsRoutes,
