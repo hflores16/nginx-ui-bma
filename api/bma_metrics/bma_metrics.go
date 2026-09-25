@@ -98,6 +98,16 @@ type HistoryPoint struct {
 	Bytes           int64   `json:"bytes"`
 }
 
+type HealthEvent struct {
+	Timestamp   string   `json:"timestamp"`
+	Backend     string   `json:"backend"`
+	BackendName string   `json:"backend_name"`
+	Kind        string   `json:"kind"`
+	LatencyMS   float64  `json:"latency_ms"`
+	Services    []string `json:"services,omitempty"`
+	Upstreams   []string `json:"upstreams,omitempty"`
+}
+
 type Response struct {
 	GeneratedAt       string           `json:"generated_at"`
 	Period            string           `json:"period"`
@@ -109,6 +119,7 @@ type Response struct {
 	Services          []ServiceSummary `json:"services"`
 	Backends          []BackendSummary `json:"backends"`
 	History           []HistoryPoint   `json:"history"`
+	HealthEvents      []HealthEvent    `json:"health_events"`
 	AvailableServices []string         `json:"available_services"`
 	AvailablePorts    []string         `json:"available_ports"`
 }
@@ -483,6 +494,32 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 		response.Backends = append(response.Backends, item)
 	}
 
+	for _, event := range upstreamsvc.GetUpstreamService().GetAvailabilityEvents(20) {
+		meta := aliases[event.Socket]
+		name := event.Socket
+		if meta.Name != "" {
+			name = meta.Name
+		}
+
+		servicesForEvent := healthEventServices(event.Socket, configured, aliases)
+		if serviceFilter != "" && !containsString(servicesForEvent, serviceFilter) {
+			continue
+		}
+		if portFilter != "" && backendPort(event.Socket) != portFilter {
+			continue
+		}
+
+		response.HealthEvents = append(response.HealthEvents, HealthEvent{
+			Timestamp:   event.Timestamp.Local().Format(time.RFC3339),
+			Backend:     event.Socket,
+			BackendName: name,
+			Kind:        event.Kind,
+			LatencyMS:   float64(event.Latency),
+			Services:    servicesForEvent,
+			Upstreams:   append([]string(nil), meta.Upstreams...),
+		})
+	}
+
 	historyKeys := make([]string, 0, len(history))
 	for key := range history {
 		historyKeys = append(historyKeys, key)
@@ -727,6 +764,37 @@ func joinSocket(host, port string) string {
 		return "[" + host + "]:" + port
 	}
 	return host + ":" + port
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func healthEventServices(
+	healthKey string,
+	configured map[string][]configuredBackend,
+	aliases map[string]backendMeta,
+) []string {
+	set := make(map[string]struct{})
+
+	for service, backends := range configured {
+		for _, backend := range backends {
+			meta := backend.Meta
+			if meta.HealthKey == "" {
+				meta = aliases[backend.Backend]
+			}
+			if backend.Backend == healthKey || meta.HealthKey == healthKey {
+				set[service] = struct{}{}
+			}
+		}
+	}
+
+	return sortedKeys(set)
 }
 
 func appendUnique(values []string, value string) []string {
