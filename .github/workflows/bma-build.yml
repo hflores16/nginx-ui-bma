@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - bma-load-balancing-v2.6.1
+      - bma-load-balancing-v2.7.0
     paths:
       - "api/bma_metrics/**"
       - "app/src/api/bma_metrics.ts"
