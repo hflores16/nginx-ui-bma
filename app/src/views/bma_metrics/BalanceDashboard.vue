@@ -72,6 +72,67 @@ function isInternalBackend(item: BackendSummary) {
     || backend === '[::1]:9000'
 }
 
+type HealthState = 'healthy' | 'degraded' | 'offline' | 'unknown'
+
+function backend5xxRate(item: BackendSummary) {
+  if (item.requests <= 0)
+    return 0
+  return item.status_5xx / item.requests * 100
+}
+
+function healthState(item: BackendSummary): HealthState {
+  if (item.online === false)
+    return 'offline'
+
+  if (item.online !== true)
+    return 'unknown'
+
+  const highHealthLatency = (item.health_latency_ms ?? 0) >= 100
+  const highResponseLatency = item.avg_response_ms >= 500
+  const high5xxRate = backend5xxRate(item) >= 1
+
+  if (highHealthLatency || highResponseLatency || high5xxRate)
+    return 'degraded'
+
+  return 'healthy'
+}
+
+function healthLabel(item: BackendSummary) {
+  switch (healthState(item)) {
+    case 'healthy':
+      return $gettext('Healthy')
+    case 'degraded':
+      return $gettext('Degraded')
+    case 'offline':
+      return $gettext('Offline')
+    default:
+      return $gettext('Sin health data')
+  }
+}
+
+function healthColor(item: BackendSummary) {
+  switch (healthState(item)) {
+    case 'healthy':
+      return 'success'
+    case 'degraded':
+      return 'warning'
+    case 'offline':
+      return 'error'
+    default:
+      return undefined
+  }
+}
+
+function healthDetail(item: BackendSummary) {
+  if (item.online === false)
+    return $gettext('Health check sin respuesta')
+
+  if (item.online !== true)
+    return $gettext('Health check sin datos')
+
+  return `${$gettext('Health check')}: ${formatDecimal(item.health_latency_ms ?? 0, 1)} ms`
+}
+
 const visibleBackends = computed(() =>
   backends.value.filter(backend => {
     if (isInternalBackend(backend))
@@ -80,9 +141,11 @@ const visibleBackends = computed(() =>
     if (showAllConfigured.value)
       return true
 
-    // Default operational view: keep nodes that actually carried traffic.
-    // Offline configured nodes remain visible even with zero traffic.
-    return backend.has_traffic || backend.online === false
+    const state = healthState(backend)
+
+    // Operational view: traffic-carrying nodes plus any degraded/offline node,
+    // even when it received zero requests in the selected period.
+    return backend.has_traffic || state === 'offline' || state === 'degraded'
   }),
 )
 
@@ -94,6 +157,23 @@ const hiddenConfiguredCount = computed(() =>
     ),
   ).length,
 )
+
+const healthCounts = computed(() => {
+  const result = {
+    healthy: 0,
+    degraded: 0,
+    offline: 0,
+    unknown: 0,
+  }
+
+  for (const backend of backends.value) {
+    if (isInternalBackend(backend))
+      continue
+    result[healthState(backend)]++
+  }
+
+  return result
+})
 
 const historyMetricOptions = computed(() => [
   { label: $gettext('Requests por segundo'), value: 'requests_per_second' },
@@ -515,6 +595,18 @@ const historyOption = computed<EChartsOption>(() => {
       <template #title>
         <div class="backend-section-title">
           <span>{{ $gettext('Nodos / Backends') }}</span>
+          <ATag color="success" :bordered="false">
+            {{ healthCounts.healthy }} {{ $gettext('Healthy') }}
+          </ATag>
+          <ATag v-if="healthCounts.degraded > 0" color="warning" :bordered="false">
+            {{ healthCounts.degraded }} {{ $gettext('Degraded') }}
+          </ATag>
+          <ATag v-if="healthCounts.offline > 0" color="error" :bordered="false">
+            {{ healthCounts.offline }} {{ $gettext('Offline') }}
+          </ATag>
+          <ATag v-if="healthCounts.unknown > 0" :bordered="false">
+            {{ healthCounts.unknown }} {{ $gettext('sin health data') }}
+          </ATag>
           <ATag v-if="hiddenConfiguredCount > 0 && !showAllConfigured" :bordered="false">
             {{ hiddenConfiguredCount }} {{ $gettext('sin tráfico ocultos') }}
           </ATag>
@@ -538,6 +630,7 @@ const historyOption = computed<EChartsOption>(() => {
           v-for="backend in visibleBackends"
           :key="`${backend.service}-${backend.backend}`"
           class="backend-card"
+          :class="`health-${healthState(backend)}`"
         >
           <div class="backend-title-row">
             <div>
@@ -553,22 +646,18 @@ const historyOption = computed<EChartsOption>(() => {
             </div>
 
             <ATag
-              v-if="backend.online === true"
-              color="success"
+              :color="healthColor(backend)"
               :bordered="false"
             >
-              {{ $gettext('Online') }}
+              {{ healthLabel(backend) }}
             </ATag>
-            <ATag
-              v-else-if="backend.online === false"
-              color="error"
-              :bordered="false"
-            >
-              {{ $gettext('Offline') }}
-            </ATag>
-            <ATag v-else :bordered="false">
-              {{ $gettext('Sin health data') }}
-            </ATag>
+          </div>
+
+          <div
+            class="health-detail"
+            :class="{ 'health-detail-error': healthState(backend) === 'offline' }"
+          >
+            {{ healthDetail(backend) }}
           </div>
 
           <div class="client-value">
@@ -781,6 +870,14 @@ const historyOption = computed<EChartsOption>(() => {
   background: var(--ant-color-bg-container);
 }
 
+.backend-card.health-degraded {
+  border-color: var(--ant-color-warning-border);
+}
+
+.backend-card.health-offline {
+  border-color: var(--ant-color-error-border);
+}
+
 .backend-title-row {
   display: flex;
   justify-content: space-between;
@@ -797,6 +894,16 @@ const historyOption = computed<EChartsOption>(() => {
   margin-top: 2px;
   color: var(--ant-color-text-secondary);
   font-size: 12px;
+}
+
+.health-detail {
+  margin-top: 8px;
+  color: var(--ant-color-text-tertiary);
+  font-size: 11px;
+}
+
+.health-detail-error {
+  color: var(--ant-color-error);
 }
 
 .client-value {
