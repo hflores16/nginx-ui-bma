@@ -28,6 +28,19 @@ type Definition struct {
 	LastSeen   time.Time     `json:"last_seen"`
 }
 
+const maxAvailabilityEvents = 200
+
+// AvailabilityEvent records a real connectivity transition detected by the
+// periodic upstream probe. The initial baseline is intentionally not recorded
+// as a transition, so the list contains actual drops and recoveries.
+type AvailabilityEvent struct {
+	Timestamp time.Time `json:"timestamp"`
+	Socket    string    `json:"socket"`
+	Online    bool      `json:"online"`
+	Latency   float32   `json:"latency"`
+	Kind      string    `json:"kind"`
+}
+
 // Service manages upstream availability testing
 type Service struct {
 	targets         map[string]*TargetInfo // key: host:port
@@ -44,6 +57,8 @@ type Service struct {
 	cachedDisabledSockets     map[string]bool
 	disabledSocketsCacheMutex sync.RWMutex
 	disabledSocketsCacheValid bool // true if cache is valid, false if needs refresh
+	availabilityEvents        []AvailabilityEvent
+	availabilityEventsMutex   sync.RWMutex
 }
 
 var (
@@ -219,6 +234,69 @@ func (s *Service) GetAvailabilityMap() map[string]*Status {
 	return result
 }
 
+// GetAvailabilityEvents returns newest health transitions first.
+func (s *Service) GetAvailabilityEvents(limit int) []AvailabilityEvent {
+	s.availabilityEventsMutex.RLock()
+	defer s.availabilityEventsMutex.RUnlock()
+
+	if limit <= 0 || limit > len(s.availabilityEvents) {
+		limit = len(s.availabilityEvents)
+	}
+
+	out := make([]AvailabilityEvent, 0, limit)
+	for i := len(s.availabilityEvents) - 1; i >= 0 && len(out) < limit; i-- {
+		out = append(out, s.availabilityEvents[i])
+	}
+	return out
+}
+
+func (s *Service) recordAvailabilityTransitions(previous, current map[string]*Status) {
+	now := time.Now()
+	events := make([]AvailabilityEvent, 0)
+
+	for socket, status := range current {
+		if status == nil {
+			continue
+		}
+
+		oldStatus, existed := previous[socket]
+		if !existed || oldStatus == nil || oldStatus.Online == status.Online {
+			continue
+		}
+
+		kind := "offline"
+		if status.Online {
+			kind = "recovered"
+		}
+
+		event := AvailabilityEvent{
+			Timestamp: now,
+			Socket:    socket,
+			Online:    status.Online,
+			Latency:   status.Latency,
+			Kind:      kind,
+		}
+		events = append(events, event)
+
+		if status.Online {
+			logger.Infof("Upstream recovered: %s (%.2f ms)", socket, status.Latency)
+		} else {
+			logger.Warnf("Upstream offline: %s", socket)
+		}
+	}
+
+	if len(events) == 0 {
+		return
+	}
+
+	s.availabilityEventsMutex.Lock()
+	s.availabilityEvents = append(s.availabilityEvents, events...)
+	if len(s.availabilityEvents) > maxAvailabilityEvents {
+		s.availabilityEvents = append([]AvailabilityEvent(nil), s.availabilityEvents[len(s.availabilityEvents)-maxAvailabilityEvents:]...)
+	}
+	s.availabilityEventsMutex.Unlock()
+}
+
 // PerformAvailabilityTest performs availability test for all targets
 func (s *Service) PerformAvailabilityTest() {
 	if !settings.UpstreamCheckSettings.Enabled {
@@ -295,12 +373,25 @@ func (s *Service) PerformAvailabilityTest() {
 		maps.Copy(results, consulResults)
 	}
 
-	// Update availability map
+	// Update availability map and retain the previous completed probe as the
+	// baseline used to detect real state transitions.
 	s.targetsMutex.Lock()
+	previous := make(map[string]*Status, len(s.availabilityMap))
+	for socket, status := range s.availabilityMap {
+		if status == nil {
+			continue
+		}
+		previous[socket] = &Status{
+			Online:  status.Online,
+			Latency: status.Latency,
+		}
+	}
 	s.availabilityMap = results
 	s.targetsMutex.Unlock()
 
-	// logger.Debug("Availability test completed for", len(results), "targets")
+	s.recordAvailabilityTransitions(previous, results)
+
+	// logger.Debug("Upstream availability test completed for", len(results), "targets")
 }
 
 // findUpstreamNameForTarget finds which upstream a target belongs to
