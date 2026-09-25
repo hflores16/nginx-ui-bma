@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { EChartsOption } from 'echarts'
-import type { BackendSummary, MetricsPeriod, MetricsResponse } from '@/api/bma_metrics'
+import type { BackendSummary, HealthEvent, MetricsPeriod, MetricsResponse } from '@/api/bma_metrics'
 import { ReloadOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { BarChart, LineChart } from 'echarts/charts'
@@ -33,6 +33,7 @@ type HistoryMetric
 
 const historyMetric = ref<HistoryMetric>('requests_per_second')
 const showAllConfigured = ref(false)
+const lastHealthEventKey = ref<string | null>(null)
 
 const settings = useSettingsStore()
 const { theme } = storeToRefs(settings)
@@ -158,6 +159,42 @@ const hiddenConfiguredCount = computed(() =>
   ).length,
 )
 
+const offlineBackends = computed(() =>
+  backends.value.filter(backend => !isInternalBackend(backend) && healthState(backend) === 'offline'),
+)
+
+const degradedBackends = computed(() =>
+  backends.value.filter(backend => !isInternalBackend(backend) && healthState(backend) === 'degraded'),
+)
+
+const offlineAlertDescription = computed(() =>
+  offlineBackends.value.map(chartBackendLabel).join(', '),
+)
+
+const degradedAlertDescription = computed(() =>
+  degradedBackends.value.map(chartBackendLabel).join(', '),
+)
+
+const recentHealthEvents = computed(() => data.value?.health_events ?? [])
+
+const visibleServices = computed(() => {
+  const services = data.value?.services ?? []
+
+  if (showAllConfigured.value)
+    return services
+
+  return services.filter(service => {
+    const summary = service.summary
+    if (summary.requests > 0 || summary.active_clients > 0 || summary.status_4xx > 0 || summary.status_5xx > 0)
+      return true
+
+    return visibleBackends.value.some(backend =>
+      backend.service === service.service
+      && ['offline', 'degraded'].includes(healthState(backend)),
+    )
+  })
+})
+
 const healthCounts = computed(() => {
   const result = {
     healthy: 0,
@@ -193,6 +230,28 @@ function backendLabel(item: BackendSummary) {
   return item.backend_name || item.backend
 }
 
+function chartBackendLabel(item: BackendSummary) {
+  const label = backendLabel(item)
+  const duplicated = visibleBackends.value.filter(backend => backendLabel(backend) === label).length > 1
+  return duplicated ? `${label} · ${item.service.toUpperCase()}` : label
+}
+
+function healthEventKey(event: HealthEvent) {
+  return `${event.timestamp}|${event.backend}|${event.kind}`
+}
+
+function formatEventTimestamp(timestamp: string) {
+  return new Date(timestamp).toLocaleString()
+}
+
+function formatEventContext(event: HealthEvent) {
+  if (event.services?.length)
+    return event.services.map(service => service.toUpperCase()).join(', ')
+  if (event.upstreams?.length)
+    return event.upstreams.join(', ')
+  return event.backend
+}
+
 function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value)
 }
@@ -222,11 +281,27 @@ async function loadData(showSpinner = true) {
     loading.value = true
 
   try {
-    data.value = await bmaMetrics.getMetrics({
+    const nextData = await bmaMetrics.getMetrics({
       period: period.value,
       service: serviceFilter.value || undefined,
       port: portFilter.value || undefined,
     })
+
+    const newestEvent = nextData.health_events?.[0]
+    if (newestEvent) {
+      const nextEventKey = healthEventKey(newestEvent)
+
+      if (lastHealthEventKey.value && nextEventKey !== lastHealthEventKey.value) {
+        if (newestEvent.kind === 'offline')
+          message.error(`${newestEvent.backend_name} ${$gettext('quedó Offline')}`)
+        else
+          message.success(`${newestEvent.backend_name} ${$gettext('se recuperó')}`)
+      }
+
+      lastHealthEventKey.value = nextEventKey
+    }
+
+    data.value = nextData
   }
   catch (error) {
     console.error(error)
@@ -284,7 +359,7 @@ const clientDistributionOption = computed<EChartsOption>(() => {
         return `<strong>${backendLabel(row)}</strong><br/>${$gettext('Clientes activos')}: ${row.active_clients}<br/>${$gettext('Distribución')}: ${formatDecimal(row.client_percent)}%`
       },
     },
-    grid: { left: 130, right: 30, top: 15, bottom: 30 },
+    grid: { left: 145, right: 80, top: 15, bottom: 30 },
     xAxis: {
       type: 'value',
       minInterval: 1,
@@ -293,7 +368,7 @@ const clientDistributionOption = computed<EChartsOption>(() => {
     },
     yAxis: {
       type: 'category',
-      data: rows.map(backendLabel),
+      data: rows.map(chartBackendLabel),
       axisLabel: { color: chartTextColor.value },
     },
     series: [
@@ -331,7 +406,7 @@ const latencyOption = computed<EChartsOption>(() => {
         return `<strong>${backendLabel(row)}</strong><br/>${$gettext('Respuesta promedio')}: ${formatDecimal(row.avg_response_ms)} ms<br/>${$gettext('Conexión promedio')}: ${formatDecimal(row.avg_connect_ms)} ms`
       },
     },
-    grid: { left: 130, right: 30, top: 15, bottom: 30 },
+    grid: { left: 145, right: 95, top: 15, bottom: 30 },
     xAxis: {
       type: 'value',
       axisLabel: {
@@ -342,7 +417,7 @@ const latencyOption = computed<EChartsOption>(() => {
     },
     yAxis: {
       type: 'category',
-      data: rows.map(backendLabel),
+      data: rows.map(chartBackendLabel),
       axisLabel: { color: chartTextColor.value },
     },
     series: [
@@ -425,7 +500,7 @@ const historyOption = computed<EChartsOption>(() => {
     )
 
     return {
-      name: backendLabel(backend),
+      name: chartBackendLabel(backend),
       type: 'line' as const,
       smooth: true,
       showSymbol: timestamps.length <= 15,
@@ -591,6 +666,24 @@ const historyOption = computed<EChartsOption>(() => {
       </ACard>
     </div>
 
+    <AAlert
+      v-if="offlineBackends.length > 0"
+      class="mb-4"
+      type="error"
+      show-icon
+      :message="`${offlineBackends.length} ${$gettext('backend(s) Offline')}`"
+      :description="offlineAlertDescription"
+    />
+
+    <AAlert
+      v-if="degradedBackends.length > 0"
+      class="mb-4"
+      type="warning"
+      show-icon
+      :message="`${degradedBackends.length} ${$gettext('backend(s) Degraded')}`"
+      :description="degradedAlertDescription"
+    />
+
     <ACard class="mb-4" :loading="loading">
       <template #title>
         <div class="backend-section-title">
@@ -708,6 +801,40 @@ const historyOption = computed<EChartsOption>(() => {
       </div>
     </ACard>
 
+    <ACard class="mb-4" :title="$gettext('Eventos de disponibilidad')">
+      <AEmpty
+        v-if="recentHealthEvents.length === 0"
+        :description="$gettext('No se han registrado caídas o recuperaciones desde que inició el servicio')"
+      />
+
+      <div v-else class="event-list">
+        <div
+          v-for="event in recentHealthEvents"
+          :key="healthEventKey(event)"
+          class="event-row"
+        >
+          <ATag
+            :color="event.kind === 'offline' ? 'error' : 'success'"
+            :bordered="false"
+          >
+            {{ event.kind === 'offline' ? $gettext('Caída') : $gettext('Recuperado') }}
+          </ATag>
+
+          <div class="event-main">
+            <strong>{{ event.backend_name }}</strong>
+            <span>{{ formatEventContext(event) }}</span>
+          </div>
+
+          <div class="event-meta">
+            <span>{{ formatEventTimestamp(event.timestamp) }}</span>
+            <strong v-if="event.kind === 'recovered'">
+              {{ formatDecimal(event.latency_ms, 1) }} ms
+            </strong>
+          </div>
+        </div>
+      </div>
+    </ACard>
+
     <div class="charts-grid">
       <ACard :title="$gettext('Clientes activos por nodo')" :loading="loading">
         <VChart
@@ -766,7 +893,7 @@ const historyOption = computed<EChartsOption>(() => {
           <span>5XX</span>
         </div>
         <div
-          v-for="service in data?.services ?? []"
+          v-for="service in visibleServices"
           :key="service.service"
           class="service-row"
         >
@@ -951,6 +1078,40 @@ const historyOption = computed<EChartsOption>(() => {
   font-weight: 650;
 }
 
+.event-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.event-row {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) minmax(180px, auto);
+  gap: 12px;
+  align-items: center;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--ant-color-border-secondary);
+}
+
+.event-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  span {
+    color: var(--ant-color-text-secondary);
+    font-size: 12px;
+  }
+}
+
+.event-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  color: var(--ant-color-text-secondary);
+  font-size: 12px;
+}
+
 .charts-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1016,6 +1177,15 @@ const historyOption = computed<EChartsOption>(() => {
   .summary-grid,
   .filters-grid {
     grid-template-columns: 1fr;
+  }
+
+  .event-row {
+    grid-template-columns: auto 1fr;
+  }
+
+  .event-meta {
+    grid-column: 2;
+    justify-content: flex-start;
   }
 }
 </style>
