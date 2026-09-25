@@ -40,11 +40,13 @@ type logEntry struct {
 	UpstreamResponse string `json:"upstream_response"`
 	RequestTime      string `json:"request_time"`
 	RequestID        string `json:"request_id"`
+	UserAgent        string `json:"user_agent"`
 }
 
 type Summary struct {
-	ActiveClients int     `json:"active_clients"`
-	Requests      int64   `json:"requests"`
+	ActiveClients  int     `json:"active_clients"`
+	ActiveSessions int     `json:"active_sessions"`
+	Requests       int64   `json:"requests"`
 	RequestsPerS  float64 `json:"requests_per_second"`
 	AvgResponseMS float64 `json:"avg_response_ms"`
 	AvgConnectMS  float64 `json:"avg_connect_ms"`
@@ -65,7 +67,9 @@ type BackendSummary struct {
 	Port            string   `json:"port"`
 	Upstreams       []string `json:"upstreams,omitempty"`
 	ActiveClients   int      `json:"active_clients"`
+	ActiveSessions  int      `json:"active_sessions"`
 	ClientPercent   float64  `json:"client_percent"`
+	RequestPercent  float64  `json:"request_percent"`
 	Requests        int64    `json:"requests"`
 	RequestsPerS    float64  `json:"requests_per_second"`
 	AvgResponseMS   float64  `json:"avg_response_ms"`
@@ -73,6 +77,8 @@ type BackendSummary struct {
 	Status4XX       int64    `json:"status_4xx"`
 	Status5XX       int64    `json:"status_5xx"`
 	Bytes           int64    `json:"bytes"`
+	Configured      bool     `json:"configured"`
+	HasTraffic      bool     `json:"has_traffic"`
 	Online          *bool    `json:"online,omitempty"`
 	HealthLatencyMS float64  `json:"health_latency_ms,omitempty"`
 }
@@ -114,7 +120,7 @@ type aggregate struct {
 	status5xx    int64
 	bytes        int64
 	clients      map[string]struct{}
-	active       int
+	sessions     map[string]struct{}
 }
 
 type historyAggregate struct {
@@ -262,7 +268,6 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 	global := newAggregate()
 	services := make(map[string]*aggregate)
 	backends := make(map[string]*aggregate)
-	assignments := make(map[string]string)
 	history := make(map[string]*historyAggregate)
 	availableServices := make(map[string]struct{})
 	availablePorts := make(map[string]struct{})
@@ -270,6 +275,10 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 	for _, entry := range entries {
 		ts, err := time.Parse(time.RFC3339, entry.Timestamp)
 		if err != nil || ts.Before(cutoff) {
+			continue
+		}
+
+		if isSyntheticEntry(entry) {
 			continue
 		}
 
@@ -308,13 +317,15 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 		connectSeconds, connectOK := parseFloat(lastValue(entry.UpstreamConnect))
 		bytes := parseInt64(entry.Bytes)
 
-		updateAggregate(global, entry.Client, status, responseSeconds, responseOK, connectSeconds, connectOK, bytes)
-		updateAggregate(services[service], entry.Client, status, responseSeconds, responseOK, connectSeconds, connectOK, bytes)
-		updateAggregate(backends[backendKey], entry.Client, status, responseSeconds, responseOK, connectSeconds, connectOK, bytes)
-
-		if entry.Client != "" {
-			assignments[service+"\x00"+entry.Client] = backend
+		formSession := formSessionID(entry.URI)
+		globalSession := formSession
+		if globalSession != "" {
+			globalSession = service + "\x00" + globalSession
 		}
+
+		updateAggregate(global, entry.Client, globalSession, status, responseSeconds, responseOK, connectSeconds, connectOK, bytes)
+		updateAggregate(services[service], entry.Client, formSession, status, responseSeconds, responseOK, connectSeconds, connectOK, bytes)
+		updateAggregate(backends[backendKey], entry.Client, formSession, status, responseSeconds, responseOK, connectSeconds, connectOK, bytes)
 
 		bucketUnix := (ts.Unix() / int64(bucket.Seconds())) * int64(bucket.Seconds())
 		historyKey := strconv.FormatInt(bucketUnix, 10) + "\x00" + service + "\x00" + backend
@@ -339,20 +350,41 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 		}
 	}
 
-	for key, backend := range assignments {
-		parts := strings.SplitN(key, "\x00", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		service := parts[0]
-		backendKey := service + "\x00" + backend
-		if b := backends[backendKey]; b != nil {
-			b.active++
-		}
-	}
-
 	aliases := getBackendAliases()
 	health := upstreamsvc.GetUpstreamService().GetAvailabilityMap()
+	configured := configuredBackendsByService(aliases)
+
+	// Keep configured peers visible even when a node received no requests in
+	// the selected time window. This is especially useful for sticky upstreams.
+	for service, configuredBackends := range configured {
+		availableServices[service] = struct{}{}
+
+		if serviceFilter != "" && service != serviceFilter {
+			continue
+		}
+		if _, exists := services[service]; !exists {
+			services[service] = newAggregate()
+		}
+
+		for _, configuredBackend := range configuredBackends {
+			port := backendPort(configuredBackend.Backend)
+			if port != "" {
+				availablePorts[port] = struct{}{}
+			}
+			if portFilter != "" && port != portFilter {
+				continue
+			}
+
+			backendKey := service + "\x00" + configuredBackend.Backend
+			if _, exists := backends[backendKey]; !exists {
+				backends[backendKey] = newAggregate()
+			}
+
+			if _, exists := aliases[configuredBackend.Backend]; !exists {
+				aliases[configuredBackend.Backend] = configuredBackend.Meta
+			}
+		}
+	}
 
 	response := Response{
 		GeneratedAt:       time.Now().Format(time.RFC3339),
@@ -391,9 +423,14 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 		service, backend := parts[0], parts[1]
 		state := backends[key]
 		serviceClients := len(services[service].clients)
-		percent := 0.0
+		clientPercent := 0.0
 		if serviceClients > 0 {
-			percent = float64(state.active) / float64(serviceClients) * 100
+			clientPercent = float64(len(state.clients)) / float64(serviceClients) * 100
+		}
+
+		requestPercent := 0.0
+		if services[service].requests > 0 {
+			requestPercent = float64(state.requests) / float64(services[service].requests) * 100
 		}
 
 		meta := aliases[backend]
@@ -408,8 +445,10 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 			BackendName:    name,
 			Port:           backendPort(backend),
 			Upstreams:      append([]string(nil), meta.Upstreams...),
-			ActiveClients:  state.active,
-			ClientPercent:  percent,
+			ActiveClients:  len(state.clients),
+			ActiveSessions: len(state.sessions),
+			ClientPercent:  clientPercent,
+			RequestPercent: requestPercent,
 			Requests:       state.requests,
 			RequestsPerS:   safeRate(state.requests, duration),
 			AvgResponseMS:  averageMS(state.responseSum, state.responseN),
@@ -417,6 +456,8 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 			Status4XX:      state.status4xx,
 			Status5XX:      state.status5xx,
 			Bytes:          state.bytes,
+			Configured:     true,
+			HasTraffic:     state.requests > 0,
 		}
 
 		if meta.HealthKey != "" {
@@ -468,13 +509,19 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 }
 
 func newAggregate() *aggregate {
-	return &aggregate{clients: make(map[string]struct{})}
+	return &aggregate{
+		clients:  make(map[string]struct{}),
+		sessions: make(map[string]struct{}),
+	}
 }
 
-func updateAggregate(a *aggregate, client string, status int, response float64, responseOK bool, connect float64, connectOK bool, bytes int64) {
+func updateAggregate(a *aggregate, client, session string, status int, response float64, responseOK bool, connect float64, connectOK bool, bytes int64) {
 	a.requests++
 	if client != "" {
 		a.clients[client] = struct{}{}
+	}
+	if session != "" {
+		a.sessions[session] = struct{}{}
 	}
 	if responseOK {
 		a.responseSum += response
@@ -495,8 +542,9 @@ func updateAggregate(a *aggregate, client string, status int, response float64, 
 
 func toSummary(a *aggregate, duration time.Duration) Summary {
 	return Summary{
-		ActiveClients: len(a.clients),
-		Requests:      a.requests,
+		ActiveClients:  len(a.clients),
+		ActiveSessions: len(a.sessions),
+		Requests:       a.requests,
 		RequestsPerS:  safeRate(a.requests, duration),
 		AvgResponseMS: averageMS(a.responseSum, a.responseN),
 		AvgConnectMS:  averageMS(a.connectSum, a.connectN),
@@ -672,4 +720,25 @@ func appendUnique(values []string, value string) []string {
 		}
 	}
 	return append(values, value)
+}
+
+
+func isSyntheticEntry(entry logEntry) bool {
+	return strings.HasPrefix(strings.TrimSpace(entry.UserAgent), "Nginx-UI Site Checker/")
+}
+
+func formSessionID(uri string) string {
+	const marker = ";jsessionid="
+	idx := strings.Index(strings.ToLower(uri), marker)
+	if idx < 0 {
+		return ""
+	}
+
+	value := uri[idx+len(marker):]
+	for i, r := range value {
+		if r == '?' || r == '#' || r == '/' || r == ';' || r == ' ' {
+			return value[:i]
+		}
+	}
+	return value
 }
