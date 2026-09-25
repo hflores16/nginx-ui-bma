@@ -2,11 +2,11 @@
 import type { EChartsOption } from 'echarts'
 import type { BackendSummary, MetricsPeriod, MetricsResponse } from '@/api/bma_metrics'
 import { ReloadOutlined } from '@ant-design/icons-vue'
+import { message } from 'ant-design-vue'
 import { BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { message } from 'ant-design-vue'
 import { storeToRefs } from 'pinia'
 import VChart from 'vue-echarts'
 import bmaMetrics from '@/api/bma_metrics'
@@ -107,7 +107,7 @@ function resetRefreshTimer() {
     clearInterval(refreshTimer)
 
   const interval = ['1m', '5m', '15m'].includes(period.value) ? 15000 : 60000
-  refreshTimer = setInterval(() => loadData(false), interval)
+  refreshTimer = setInterval(loadData, interval, false)
 }
 
 watch(period, () => {
