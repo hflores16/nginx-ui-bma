@@ -217,19 +217,15 @@ func readWindow(path string, cutoff time.Time, maxBytes int64) ([]logEntry, bool
 			return nil, false, err
 		}
 
-		// Discard the first partial line after seeking into the middle of the file.
-		reader := bufio.NewReaderSize(f, 64*1024)
-		if _, err = reader.ReadString('\n'); err != nil && !errors.Is(err, io.EOF) {
-			return nil, false, err
-		}
-		current, seekErr := f.Seek(0, io.SeekCurrent)
-		if seekErr == nil {
-			start = current
-		}
 	}
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+
+	// If we sought into the middle of the file, discard one partial line.
+	if start > 0 && scanner.Scan() {
+		// Intentionally ignored.
+	}
 
 	entries := make([]logEntry, 0, 4096)
 	var firstTimestamp time.Time
@@ -288,7 +284,7 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 			continue
 		}
 		port := backendPort(backend)
-		if port != "" {
+		if port != "" && (serviceFilter == "" || service == serviceFilter) {
 			availablePorts[port] = struct{}{}
 		}
 
@@ -427,7 +423,7 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 			if status, ok := health[meta.HealthKey]; ok && status != nil {
 				online := status.Online
 				item.Online = &online
-				item.HealthLatencyMS = status.Latency
+				item.HealthLatencyMS = float64(status.Latency)
 			}
 		}
 		response.Backends = append(response.Backends, item)
