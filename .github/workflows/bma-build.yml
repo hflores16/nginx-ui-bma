@@ -1,0 +1,99 @@
+name: BMA Linux AMD64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - bma-load-balancing-v2.5.10
+    paths:
+      - "api/bma_metrics/**"
+      - "app/src/api/bma_metrics.ts"
+      - "app/src/routes/modules/bma_metrics.ts"
+      - "app/src/views/bma_metrics/**"
+      - "app/src/routes/index.ts"
+      - "router/routers.go"
+      - ".github/workflows/bma-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build nginx-ui-bma linux/amd64
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+      GOOS: linux
+      GOARCH: amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install frontend dependencies
+        run: bun ci
+
+      - name: Frontend lint
+        run: bun run lint
+
+      - name: Frontend typecheck
+        run: bun run typecheck
+
+      - name: Build frontend
+        run: bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ^1.26.5
+          cache: false
+
+      - name: Test BMA API package
+        run: go test ./api/bma_metrics
+
+      - name: Generate version metadata
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: go generate cmd/version/generate.go
+
+      - name: Install musl cross compiler
+        uses: nginxui/musl-cross-compilers@v1
+        id: musl
+        with:
+          target: x86_64-linux-musl
+          variant: richfelker/musl-cross-make
+
+      - name: Build static linux/amd64 binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="${{ steps.musl.outputs.path }}:$PATH"
+          export CC=x86_64-linux-musl-gcc
+          export CXX=x86_64-linux-musl-g++
+          mkdir -p dist
+          go build -trimpath -tags=jsoniter \
+            -ldflags "-w --extldflags '-static' -X 'github.com/0xJacky/Nginx-UI/settings.buildTime=$(date +%s)'" \
+            -o dist/nginx-ui-bma-linux-amd64 \
+            -v main.go
+          chmod +x dist/nginx-ui-bma-linux-amd64
+          file dist/nginx-ui-bma-linux-amd64
+          ./dist/nginx-ui-bma-linux-amd64 -v
+
+      - name: SHA256
+        run: sha256sum dist/nginx-ui-bma-linux-amd64 | tee dist/nginx-ui-bma-linux-amd64.sha256
+
+      - name: Upload BMA binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: nginx-ui-bma-linux-amd64
+          path: |
+            dist/nginx-ui-bma-linux-amd64
+            dist/nginx-ui-bma-linux-amd64.sha256
+          if-no-files-found: error
+          retention-days: 30
