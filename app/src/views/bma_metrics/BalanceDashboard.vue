@@ -233,7 +233,6 @@ const historyOption = computed<EChartsOption>(() => {
     .sort((a, b) => b.requests - a.requests)
     .slice(0, 8)
 
-  const allowed = new Set(topBackends.map(item => `${item.service}\x00${item.backend}`))
   const timestamps = [...new Set(points.map(point => point.timestamp))].sort()
 
   const series = topBackends.map(backend => {
@@ -250,7 +249,7 @@ const historyOption = computed<EChartsOption>(() => {
       showSymbol: false,
       data: timestamps.map(timestamp => byTime.get(timestamp)?.requests ?? 0),
     }
-  }).filter(item => allowed.size > 0)
+  })
 
   return {
     tooltip: { trigger: 'axis' },
