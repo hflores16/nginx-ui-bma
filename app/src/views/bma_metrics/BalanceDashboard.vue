@@ -21,6 +21,18 @@ const serviceFilter = ref('')
 const portFilter = ref('')
 let refreshTimer: ReturnType<typeof setInterval> | undefined
 
+type HistoryMetric =
+  | 'requests_per_second'
+  | 'requests'
+  | 'active_clients'
+  | 'avg_response_ms'
+  | 'avg_connect_ms'
+  | 'status_4xx'
+  | 'status_5xx'
+  | 'bytes_mb'
+
+const historyMetric = ref<HistoryMetric>('requests_per_second')
+
 const settings = useSettingsStore()
 const { theme } = storeToRefs(settings)
 
@@ -28,6 +40,7 @@ const periods = [
   { label: '1 min', value: '1m' },
   { label: '5 min', value: '5m' },
   { label: '15 min', value: '15m' },
+  { label: '30 min', value: '30m' },
   { label: '1 hora', value: '1h' },
   { label: '6 horas', value: '6h' },
   { label: '24 horas', value: '24h' },
@@ -50,6 +63,17 @@ const portOptions = computed(() => [
 ])
 
 const backends = computed(() => data.value?.backends ?? [])
+
+const historyMetricOptions = computed(() => [
+  { label: $gettext('Requests por segundo'), value: 'requests_per_second' },
+  { label: $gettext('Requests por intervalo'), value: 'requests' },
+  { label: $gettext('Clientes activos'), value: 'active_clients' },
+  { label: $gettext('Tiempo de respuesta'), value: 'avg_response_ms' },
+  { label: $gettext('Tiempo de conexión'), value: 'avg_connect_ms' },
+  { label: $gettext('Errores 4XX'), value: 'status_4xx' },
+  { label: $gettext('Errores 5XX'), value: 'status_5xx' },
+  { label: $gettext('Transferido'), value: 'bytes_mb' },
+])
 
 const chartTextColor = computed(() => theme.value === 'dark' ? '#b4b4b4' : '#595959')
 const chartGridColor = computed(() => theme.value === 'dark' ? '#303030' : '#f0f0f0')
@@ -227,6 +251,48 @@ const latencyOption = computed<EChartsOption>(() => {
   }
 })
 
+function historyMetricValue(point: MetricsResponse['history'][number], metric: HistoryMetric) {
+  switch (metric) {
+    case 'requests_per_second':
+      return point.requests_per_second
+    case 'requests':
+      return point.requests
+    case 'active_clients':
+      return point.active_clients
+    case 'avg_response_ms':
+      return point.avg_response_ms
+    case 'avg_connect_ms':
+      return point.avg_connect_ms
+    case 'status_4xx':
+      return point.status_4xx
+    case 'status_5xx':
+      return point.status_5xx
+    case 'bytes_mb':
+      return point.bytes / 1024 / 1024
+  }
+}
+
+const historyMetricMeta = computed(() => {
+  switch (historyMetric.value) {
+    case 'requests_per_second':
+      return { label: $gettext('Requests por segundo'), suffix: ' req/s', digits: 2, integer: false, gapsAsZero: true }
+    case 'requests':
+      return { label: $gettext('Requests por intervalo'), suffix: '', digits: 0, integer: true, gapsAsZero: true }
+    case 'active_clients':
+      return { label: $gettext('Clientes activos'), suffix: '', digits: 0, integer: true, gapsAsZero: true }
+    case 'avg_response_ms':
+      return { label: $gettext('Tiempo de respuesta'), suffix: ' ms', digits: 1, integer: false, gapsAsZero: false }
+    case 'avg_connect_ms':
+      return { label: $gettext('Tiempo de conexión'), suffix: ' ms', digits: 1, integer: false, gapsAsZero: false }
+    case 'status_4xx':
+      return { label: $gettext('Errores 4XX'), suffix: '', digits: 0, integer: true, gapsAsZero: true }
+    case 'status_5xx':
+      return { label: $gettext('Errores 5XX'), suffix: '', digits: 0, integer: true, gapsAsZero: true }
+    case 'bytes_mb':
+      return { label: $gettext('Transferido'), suffix: ' MB', digits: 2, integer: false, gapsAsZero: true }
+  }
+})
+
 const historyOption = computed<EChartsOption>(() => {
   const points = data.value?.history ?? []
   const topBackends = [...backends.value]
@@ -234,6 +300,7 @@ const historyOption = computed<EChartsOption>(() => {
     .slice(0, 8)
 
   const timestamps = [...new Set(points.map(point => point.timestamp))].sort()
+  const meta = historyMetricMeta.value
 
   const series = topBackends.map(backend => {
     const byTime = new Map(
@@ -246,32 +313,52 @@ const historyOption = computed<EChartsOption>(() => {
       name: backendLabel(backend),
       type: 'line' as const,
       smooth: true,
-      showSymbol: false,
-      data: timestamps.map(timestamp => byTime.get(timestamp)?.requests ?? 0),
+      showSymbol: timestamps.length <= 15,
+      symbolSize: 5,
+      data: timestamps.map(timestamp => {
+        const point = byTime.get(timestamp)
+        if (!point)
+          return meta.gapsAsZero ? 0 : null
+
+        const value = historyMetricValue(point, historyMetric.value)
+        return Number(value.toFixed(meta.digits))
+      }),
     }
   })
 
   return {
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      valueFormatter: value => {
+        if (value === null || value === undefined)
+          return '-'
+        return `${value}${meta.suffix}`
+      },
+    },
     legend: {
       type: 'scroll',
       textStyle: { color: chartTextColor.value },
     },
-    grid: { left: 60, right: 25, top: 50, bottom: 55 },
+    grid: { left: 70, right: 25, top: 50, bottom: 55 },
     xAxis: {
       type: 'category',
+      boundaryGap: false,
       data: timestamps.map(timestamp => new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
       axisLabel: { color: chartTextColor.value },
     },
     yAxis: {
       type: 'value',
-      minInterval: 1,
-      axisLabel: { color: chartTextColor.value },
+      ...(meta.integer ? { minInterval: 1 } : {}),
+      axisLabel: {
+        color: chartTextColor.value,
+        formatter: `{value}${meta.suffix}`,
+      },
       splitLine: { lineStyle: { color: chartGridColor.value } },
     },
     series,
   }
 })
+
 </script>
 
 <template>
@@ -504,7 +591,18 @@ const historyOption = computed<EChartsOption>(() => {
       </ACard>
     </div>
 
-    <ACard class="mb-4" :title="$gettext('Requests a través del tiempo')" :loading="loading">
+    <ACard class="mb-4" :loading="loading">
+      <template #title>
+        {{ $gettext('Evolución histórica por nodo') }}
+      </template>
+      <template #extra>
+        <ASelect
+          v-model:value="historyMetric"
+          :options="historyMetricOptions"
+          style="width: 220px"
+        />
+      </template>
+
       <VChart
         v-if="data?.history?.length"
         :option="historyOption"
@@ -512,6 +610,10 @@ const historyOption = computed<EChartsOption>(() => {
         class="history-chart"
       />
       <AEmpty v-else />
+
+      <div v-if="data?.history?.length" class="history-foot">
+        {{ $gettext('Cada línea representa un backend. Se muestran hasta 8 nodos con mayor volumen de requests para mantener la gráfica legible.') }}
+      </div>
     </ACard>
 
     <ACard :title="$gettext('Resumen por servicio')" :loading="loading">
@@ -692,7 +794,13 @@ const historyOption = computed<EChartsOption>(() => {
 
 .history-chart {
   width: 100%;
-  height: 380px;
+  height: 420px;
+}
+
+.history-foot {
+  margin-top: 8px;
+  color: var(--ant-color-text-tertiary);
+  font-size: 12px;
 }
 
 .service-table {
