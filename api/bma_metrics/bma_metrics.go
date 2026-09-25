@@ -84,15 +84,18 @@ type BackendSummary struct {
 }
 
 type HistoryPoint struct {
-	Timestamp      string `json:"timestamp"`
-	Service        string `json:"service"`
-	Backend        string `json:"backend"`
-	BackendName    string `json:"backend_name"`
-	ActiveClients  int    `json:"active_clients"`
-	Requests       int64  `json:"requests"`
-	AvgResponseMS float64 `json:"avg_response_ms"`
-	Status4XX      int64  `json:"status_4xx"`
-	Status5XX      int64  `json:"status_5xx"`
+	Timestamp      string  `json:"timestamp"`
+	Service        string  `json:"service"`
+	Backend        string  `json:"backend"`
+	BackendName    string  `json:"backend_name"`
+	ActiveClients  int     `json:"active_clients"`
+	Requests       int64   `json:"requests"`
+	RequestsPerS   float64 `json:"requests_per_second"`
+	AvgResponseMS  float64 `json:"avg_response_ms"`
+	AvgConnectMS   float64 `json:"avg_connect_ms"`
+	Status4XX      int64   `json:"status_4xx"`
+	Status5XX      int64   `json:"status_5xx"`
+	Bytes           int64   `json:"bytes"`
 }
 
 type Response struct {
@@ -127,8 +130,11 @@ type historyAggregate struct {
 	requests    int64
 	responseSum float64
 	responseN   int64
+	connectSum  float64
+	connectN    int64
 	status4xx   int64
 	status5xx   int64
+	bytes       int64
 	clients     map[string]struct{}
 }
 
@@ -159,7 +165,7 @@ func GetMetrics(c *gin.Context) {
 	periodName := strings.TrimSpace(c.DefaultQuery("period", "5m"))
 	duration, bucket, maxBytes, ok := parsePeriod(periodName)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid period; use 1m, 5m, 15m, 1h, 6h or 24h"})
+		c.JSON(http.StatusBadRequest, gin.H{"message": "invalid period; use 1m, 5m, 15m, 30m, 1h, 6h or 24h"})
 		return
 	}
 
@@ -193,6 +199,8 @@ func parsePeriod(value string) (time.Duration, time.Duration, int64, bool) {
 		return 5 * time.Minute, time.Minute, 32 * 1024 * 1024, true
 	case "15m":
 		return 15 * time.Minute, time.Minute, 64 * 1024 * 1024, true
+	case "30m":
+		return 30 * time.Minute, time.Minute, 96 * 1024 * 1024, true
 	case "1h":
 		return time.Hour, 5 * time.Minute, 128 * 1024 * 1024, true
 	case "6h":
@@ -342,6 +350,11 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 			h.responseSum += responseSeconds
 			h.responseN++
 		}
+		if connectOK {
+			h.connectSum += connectSeconds
+			h.connectN++
+		}
+		h.bytes += bytes
 		if status >= 400 && status < 500 {
 			h.status4xx++
 		}
@@ -499,9 +512,12 @@ func aggregateEntries(entries []logEntry, cutoff time.Time, duration, bucket tim
 			BackendName:    name,
 			ActiveClients:  len(h.clients),
 			Requests:       h.requests,
+			RequestsPerS:   safeRate(h.requests, bucket),
 			AvgResponseMS: averageMS(h.responseSum, h.responseN),
+			AvgConnectMS:  averageMS(h.connectSum, h.connectN),
 			Status4XX:      h.status4xx,
 			Status5XX:      h.status5xx,
+			Bytes:          h.bytes,
 		})
 	}
 
