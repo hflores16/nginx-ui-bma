@@ -6,6 +6,7 @@ import (
 	"github.com/0xJacky/Nginx-UI/api/analytic"
 	"github.com/0xJacky/Nginx-UI/api/audit"
 	"github.com/0xJacky/Nginx-UI/api/backup"
+	bmaMetrics "github.com/0xJacky/Nginx-UI/api/bma_metrics"
 	"github.com/0xJacky/Nginx-UI/api/certificate"
 	"github.com/0xJacky/Nginx-UI/api/cluster"
 	"github.com/0xJacky/Nginx-UI/api/config"
@@ -117,6 +118,7 @@ func InitRouter() {
 			notification.InitRouter(g)
 			external_notify.InitRouter(g)
 			backup.InitAutoBackupRouter(g)
+			bmaMetrics.InitRouter(g)
 			nginxLog.InitRouter(g)
 			upstream.InitHTTPRouter(g)
 			g.GET("/geolite/status", geolite.GetStatus)
