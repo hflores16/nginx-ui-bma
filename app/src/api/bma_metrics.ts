@@ -57,6 +57,16 @@ export interface HistoryPoint {
   bytes: number
 }
 
+export interface HealthEvent {
+  timestamp: string
+  backend: string
+  backend_name: string
+  kind: 'offline' | 'recovered'
+  latency_ms: number
+  services?: string[]
+  upstreams?: string[]
+}
+
 export interface MetricsResponse {
   generated_at: string
   period: MetricsPeriod
@@ -68,6 +78,7 @@ export interface MetricsResponse {
   services: ServiceSummary[]
   backends: BackendSummary[]
   history: HistoryPoint[]
+  health_events: HealthEvent[]
   available_services: string[]
   available_ports: string[]
 }
