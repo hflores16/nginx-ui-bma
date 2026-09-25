@@ -32,6 +32,7 @@ type HistoryMetric
     | 'bytes_mb'
 
 const historyMetric = ref<HistoryMetric>('requests_per_second')
+const showAllConfigured = ref(false)
 
 const settings = useSettingsStore()
 const { theme } = storeToRefs(settings)
@@ -63,6 +64,36 @@ const portOptions = computed(() => [
 ])
 
 const backends = computed(() => data.value?.backends ?? [])
+
+function isInternalBackend(item: BackendSummary) {
+  const backend = item.backend.trim().toLowerCase()
+  return backend === '127.0.0.1:9000'
+    || backend === 'localhost:9000'
+    || backend === '[::1]:9000'
+}
+
+const visibleBackends = computed(() =>
+  backends.value.filter(backend => {
+    if (isInternalBackend(backend))
+      return false
+
+    if (showAllConfigured.value)
+      return true
+
+    // Default operational view: keep nodes that actually carried traffic.
+    // Offline configured nodes remain visible even with zero traffic.
+    return backend.has_traffic || backend.online === false
+  }),
+)
+
+const hiddenConfiguredCount = computed(() =>
+  backends.value.filter(backend =>
+    !isInternalBackend(backend)
+    && !visibleBackends.value.some(visible =>
+      visible.service === backend.service && visible.backend === backend.backend,
+    ),
+  ).length,
+)
 
 const historyMetricOptions = computed(() => [
   { label: $gettext('Requests por segundo'), value: 'requests_per_second' },
@@ -159,7 +190,7 @@ onUnmounted(() => {
 })
 
 const clientDistributionOption = computed<EChartsOption>(() => {
-  const rows = [...backends.value].sort((a, b) => b.active_clients - a.active_clients)
+  const rows = [...visibleBackends.value].sort((a, b) => b.active_clients - a.active_clients)
 
   return {
     tooltip: {
@@ -206,7 +237,7 @@ const clientDistributionOption = computed<EChartsOption>(() => {
 })
 
 const latencyOption = computed<EChartsOption>(() => {
-  const rows = [...backends.value].sort((a, b) => b.avg_response_ms - a.avg_response_ms)
+  const rows = [...visibleBackends.value].sort((a, b) => b.avg_response_ms - a.avg_response_ms)
 
   return {
     tooltip: {
@@ -299,7 +330,7 @@ const historyMetricMeta = computed(() => {
 
 const historyOption = computed<EChartsOption>(() => {
   const points = data.value?.history ?? []
-  const topBackends = [...backends.value]
+  const topBackends = [...visibleBackends.value]
     .sort((a, b) => b.requests - a.requests)
     .slice(0, 8)
 
@@ -480,15 +511,31 @@ const historyOption = computed<EChartsOption>(() => {
       </ACard>
     </div>
 
-    <ACard class="mb-4" :title="$gettext('Nodos / Backends')" :loading="loading">
+    <ACard class="mb-4" :loading="loading">
+      <template #title>
+        <div class="backend-section-title">
+          <span>{{ $gettext('Nodos / Backends') }}</span>
+          <ATag v-if="hiddenConfiguredCount > 0 && !showAllConfigured" :bordered="false">
+            {{ hiddenConfiguredCount }} {{ $gettext('sin tráfico ocultos') }}
+          </ATag>
+        </div>
+      </template>
+
+      <template #extra>
+        <div class="backend-toolbar">
+          <span>{{ $gettext('Mostrar todos los configurados') }}</span>
+          <ASwitch v-model:checked="showAllConfigured" />
+        </div>
+      </template>
+
       <AEmpty
-        v-if="!loading && backends.length === 0"
+        v-if="!loading && visibleBackends.length === 0"
         :description="$gettext('No hay tráfico para los filtros seleccionados')"
       />
 
       <div v-else class="backend-grid">
         <div
-          v-for="backend in backends"
+          v-for="backend in visibleBackends"
           :key="`${backend.service}-${backend.backend}`"
           class="backend-card"
         >
@@ -575,7 +622,7 @@ const historyOption = computed<EChartsOption>(() => {
     <div class="charts-grid">
       <ACard :title="$gettext('Clientes activos por nodo')" :loading="loading">
         <VChart
-          v-if="backends.length"
+          v-if="visibleBackends.length"
           :option="clientDistributionOption"
           autoresize
           class="chart"
@@ -585,7 +632,7 @@ const historyOption = computed<EChartsOption>(() => {
 
       <ACard :title="$gettext('Latencia promedio por nodo')" :loading="loading">
         <VChart
-          v-if="backends.length"
+          v-if="visibleBackends.length"
           :option="latencyOption"
           autoresize
           class="chart"
@@ -703,6 +750,20 @@ const historyOption = computed<EChartsOption>(() => {
 
 .stat-foot {
   margin-top: 6px;
+  color: var(--ant-color-text-secondary);
+  font-size: 12px;
+}
+
+.backend-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.backend-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--ant-color-text-secondary);
   font-size: 12px;
 }
