@@ -1,6 +1,6 @@
 import { http } from '@uozi-admin/request'
 
-export type MetricsPeriod = '1m' | '5m' | '15m' | '1h' | '6h' | '24h'
+export type MetricsPeriod = '1m' | '5m' | '15m' | '30m' | '1h' | '6h' | '24h'
 
 export interface MetricsSummary {
   active_clients: number
@@ -49,9 +49,12 @@ export interface HistoryPoint {
   backend_name: string
   active_clients: number
   requests: number
+  requests_per_second: number
   avg_response_ms: number
+  avg_connect_ms: number
   status_4xx: number
   status_5xx: number
+  bytes: number
 }
 
 export interface MetricsResponse {
